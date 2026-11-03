@@ -1,0 +1,13 @@
+{
+  "name": "user-app-eda-services",
+  "version": "1.0.0",
+  "private": true,
+  "description": "user-service, outbox-relay và các consumer của User App event-driven",
+  "dependencies": {
+    "amqplib": "^0.10.4",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "nodemailer": "^6.9.16",
+    "pg": "^8.13.1"
+  }
+}

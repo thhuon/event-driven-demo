@@ -1,0 +1,129 @@
+x-service: &service
+  build: ./services
+  image: user-app-eda-services
+  restart: unless-stopped
+
+services:
+  # Một Postgres, mỗi service một database riêng (userdb, emaildb, auditdb, statsdb)
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: userdb
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5436:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d userdb"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # EVENT DISTRIBUTOR
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    hostname: rabbitmq                     # giữ tên node cố định để dữ liệu durable sống qua restart
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"                      # Management UI (guest / guest)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # SMTP giả, xem email ở http://localhost:8025
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "8025:8025"
+
+  # PRODUCER: REST API, ghi users + outbox trong 1 transaction
+  user-service:
+    <<: *service
+    command: ["node", "user-service.js"]
+    environment:
+      DATABASE_URL: postgres://app:app@db:5432/userdb
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "4003:4000"
+
+  # Đọc outbox chưa gửi rồi publish lên exchange user.events
+  outbox-relay:
+    <<: *service
+    command: ["node", "outbox-relay.js"]
+    environment:
+      DATABASE_URL: postgres://app:app@db:5432/userdb
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # CONSUMERS
+  email-service:
+    <<: *service
+    command: ["node", "email-service.js"]
+    environment:
+      DATABASE_URL: postgres://app:app@db:5432/emaildb
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+      EMAIL_DELAY_MS: ${EMAIL_DELAY_MS:-300}   # giả lập mail server chậm
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  audit-service:
+    <<: *service
+    command: ["node", "audit-service.js"]
+    environment:
+      DATABASE_URL: postgres://app:app@db:5432/auditdb
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "4005:4000"
+
+  # Thêm khi demo: docker compose up -d stats-service
+  stats-service:
+    <<: *service
+    profiles: ["extra"]
+    command: ["node", "stats-service.js"]
+    environment:
+      DATABASE_URL: postgres://app:app@db:5432/statsdb
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "4004:4000"
+
+  frontend:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - user-service
+    ports:
+      - "8083:80"
+
+volumes:
+  db-data:
+  rabbitmq-data:
